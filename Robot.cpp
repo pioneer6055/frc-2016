@@ -62,383 +62,368 @@
  *		- make sure tape only retracts once per enable
  *	version 2.13 4/21/16 - CRM
  *		- remove automatic retract of tape winch
+ *	version 2.14 4/29 - CRM
+ *		- remove gyro and score in auto selection
+ *	version 2.15 9/17 - CRM
+ *		- removed winch code
+ *		- added 3 step autonomous movement to score low or high
+ *		- added shoot high goal on joystick trigger (button 1)
+ *		- add DoNothing selection for auto mode
+ *	version 2.16 9/29 - CRM
+ *		- fixed bug in autonomous (Drive vs TankDrive again)
+ *		- fixed bug in DriveStraight
+ *		- changed preferences not to overwrite
+ *		- add Servo for kicker on PWM 6
+ *		- add kicker on button 11 and 12 to test mode
+ *		- add kicker values to smartdashboard
+ *	version 2.17 9/29 - CRM
+ *		- remove servo
+ *		- add pneumatics and solenoid for kicker
+ *		- remove autonomous shooting
+ *		- add kicker action to lowbar shooting
+ *		- add USB camera for high goal view
+ *		- put kicker forward during intake
+ *	version 2.18 10/4 - CRM
+ *		- changed USB camera to cam3
+ *		- make sure kicker is forward in autonomous
+ *		- add release delay to kicker for intake
+ *	version 2.19 10/5 - CRM
+ *		- convert to IterativeRobot class
+ *
  */
-class Robot: public SampleRobot
+class Robot: public IterativeRobot
 {
+private:
+	LiveWindow *lw = LiveWindow::GetInstance();
 	VictorSP motorLF, motorLR, motorRF, motorRR;
 	VictorSP spinnerLeft, spinnerRight;
-	VictorSP winchTape, winchPull;
 	RobotDrive driveTrain;
 	RobotDrive driveSpinner;
-	RobotDrive driveWinch;
+	Compressor pcm;
+	DoubleSolenoid kickSolenoid;
 	Joystick xbox, stick;
 	PowerDistributionPanel pdp;
-	ADXRS450_Gyro gyroOne;
-	AnalogInput sonar;
 	SendableChooser *chooser;
+	const std::string autoDoNothing = "DoNothing";
 	const std::string autoDriveStraight = "DriveStraight";
-	const std::string autoLowBarToLowGoal = "LowBarToLowGoal";
+	const std::string autoLowBarBackwards = "LowBarBackwards";
 	Preferences *prefs;
-	float kUpdatePeriod = 0.015f; // loop delay of 15 milliseconds
+	uint64_t kickerDelay = 1000; //delay after trigger pull for spinup
+	uint64_t releaseDelay = 500; //delay on intake release to retract kicker
+	float intakeSpeed = 0.25f;     // speed of motors for intake of ball
+	float shootSpeed = 1.0f;       // speed of motors for shooting ball
+	float kUpdatePeriod = 0.010f;  // loop delay in milliseconds
 	std::string lastError = "";
 	std::string nowError = "";
-	const float volts_to_inches = 0.0098;
-	uint64_t step1Time = 0;
-	uint64_t step2Time = 0;
-	uint64_t shootTime = 0;
-	double step1Speed = 0.0;
-	double step2Speed = 0.0;
-	double turnSpeed = 0.0;
-	double turnAngle = 45.0;
-	double tapeSpeed = 0.0;
-	double pullSpeed = 0.0;
+	uint64_t autoTime = 0;
+	uint64_t elapsedTime = 0;
+	std::string autoSelected = "";
 
 public:
 	Robot() :
-		motorLF(0),  		 //Left Front motor on PWM channel 0
-		motorLR(1),  		 //Left Rear motor on PWM channel 1
-		motorRF(2),  		 //Right Front motor on PWM channel 2
-		motorRR(3),  		 //Right Rear motor on PWM channel 3
-		spinnerLeft(4), 	 //left spinner motor on PWM channel 4
-		spinnerRight(5), 	 //left spinner motor on PWM channel 5
-		winchTape(6), 	 	 //tape winch on PWM channel 6
-		winchPull(7), 	 	 //pull winch on PWM channel 7
-		driveTrain(motorLF,motorLR,motorRF,motorRR),
-		driveSpinner(spinnerLeft,spinnerRight),
-		driveWinch(winchTape,winchPull),
-		xbox(0),     		 //xbox on driver station USB port 0
-		stick(1),    		 //joystick on driver station USB port 1
-		pdp(),				 //power distribution controller - CAN ID = 0
-		gyroOne(SPI::Port::kOnboardCS0),	 //gyro on SPI port 0
-		sonar(0),
-		chooser(),
-	    prefs()
+	motorLF(0),  		 //Left Front motor on PWM channel 0
+	motorLR(1),  		 //Left Rear motor on PWM channel 1
+	motorRF(2),  		 //Right Front motor on PWM channel 2
+	motorRR(3),  		 //Right Rear motor on PWM channel 3
+	spinnerLeft(4), 	 //left spinner motor on PWM channel 4
+	spinnerRight(5), 	 //left spinner motor on PWM channel 5
+	driveTrain(motorLF,motorLR,motorRF,motorRR),
+	driveSpinner(spinnerLeft,spinnerRight),
+	pcm(1),              //pneumatic control module - CAN ID = 1
+	kickSolenoid(1,0,1), //double solenoid on PCM channel 0 & 1
+	xbox(0),     		 //xbox on driver station USB port 0
+	stick(1),    		 //joystick on driver station USB port 1
+	pdp(0),				 //power distribution controller - CAN ID = 0
+	chooser(),			 //selection on smartdashboard for auto mode
+	prefs()				 //preferences values on smartdashboard
 	{
 	}
 
+	//runs once on robot startup
 	void RobotInit()
 	{
-		//this sets the safety timeout for the driveTrain motors
+		//this sets the safety timeout for the drives
 		//loops in the functions below must not exceed this timeout value
-		motorLF.SetInverted(false);
-		motorLR.SetInverted(false);
-		motorRF.SetInverted(false);
-		motorRR.SetInverted(false);
+		driveTrain.SetExpiration(0.50);
+		driveSpinner.SetExpiration(0.50);
+		motorLF.SetInverted(true);
+		motorLR.SetInverted(true);
+		motorRF.SetInverted(true);
+		motorRR.SetInverted(true);
 		spinnerLeft.SetInverted(false);
-		spinnerRight.SetInverted(false);
-		driveTrain.SetExpiration(0.25);
-		driveSpinner.SetExpiration(0.25);
-		driveWinch.SetExpiration(0.25);
-		SmartDashboard::PutString("Code Version","2.13");
+		spinnerRight.SetInverted(true);
+
+		SmartDashboard::PutString("Code Version","2.19");
 		chooser = new SendableChooser();
-		chooser->AddDefault(autoDriveStraight, (void*)&autoDriveStraight);
-		chooser->AddObject(autoLowBarToLowGoal, (void*)&autoLowBarToLowGoal);
+		chooser->AddDefault(autoDoNothing, (void*)&autoDoNothing);
+		chooser->AddObject(autoDriveStraight, (void*)&autoDriveStraight);
+		chooser->AddObject(autoLowBarBackwards, (void*)&autoLowBarBackwards);
 		SmartDashboard::PutData("Auto Mode", chooser);
+
 		//initialize prefs here
 		prefs = Preferences::GetInstance();
-		if (!prefs->ContainsKey("autoStep1Time"))
-			prefs->PutLong("autoStep1Time",1500);
-		if (!prefs->ContainsKey("autoStep2Time"))
-			prefs->PutLong("autoStep2Time",1500);
-		if (!prefs->ContainsKey("autoShootTime"))
-			prefs->PutLong("autoShootTime",1500);
-		if (!prefs->ContainsKey("autoStep1Speed"))
-			prefs->PutDouble("autoStep1Speed",-0.65);
-		if (!prefs->ContainsKey("autoStep2Speed"))
-			prefs->PutDouble("autoStep2Speed",-0.65);
-		if (!prefs->ContainsKey("autoTurnSpeed"))
-			prefs->PutDouble("autoTurnSpeed",-0.65);
-		if (!prefs->ContainsKey("autoTurnAngle"))
-			prefs->PutDouble("autoTurnAngle",45.0);
-		if (!prefs->ContainsKey("tapeSpeed"))
-			prefs->PutDouble("tapeSpeed",1.00);
-		if (!prefs->ContainsKey("pullSpeed"))
-			prefs->PutDouble("pullSpeed",1.00);
-		prefs->Save();
+		if (!prefs->ContainsKey("shootSpeed"))
+			prefs->PutDouble("shootSpeed",1.0);
+		if (!prefs->ContainsKey("kickerDelay"))
+			prefs->PutLong("kickerDelay",1000);
+		if (!prefs->ContainsKey("intakeSpeed"))
+			prefs->PutDouble("intakeSpeed",0.25);
+		if (!prefs->ContainsKey("releaseDelay"))
+			prefs->PutLong("releaseDelay",500);
+
+		pcm.SetClosedLoopControl(true);
+		//retract kicker
+		kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+		//setup USB camera
+		CameraServer::GetInstance()->SetQuality(25);
+		CameraServer::GetInstance()->StartAutomaticCapture("cam3");
 	}
 
-	void Autonomous()
+	//runs once on entering Autonomous mode
+	void AutonomousInit()
+	{
+		driveTrain.SetSafetyEnabled(true);
+		driveSpinner.SetSafetyEnabled(true);
+		std::cout << "AutoMode START" << std::endl;
+		autoSelected = *((std::string*)chooser->GetSelected());
+		printf("autoSelected= %s\n",autoSelected.c_str());
+		if(autoSelected == autoLowBarBackwards)
 		{
-			uint64_t autoTime = 0;
-			uint64_t testTime = 0;
-			uint64_t totalTime = 0;
-			float dsLeft = 0.0f;
-			float dsRight = 0.0f;
-			float dtLeft = 0.0f;
-			float dtRight = 0.0f;
-			float bearing = 0.0f;         //direction we want to go
-			float heading = 0.0f;		  //direction we are going
-			float voltage(0);
-			float distance(0);
-			std::string autoSelected = "";
+			kickSolenoid.Set(DoubleSolenoid::Value::kForward);
+		}
+		autoTime = GetFPGATime();
+	}
 
-			if (IsAutonomous() && IsEnabled())
+	//runs repeatedly while in Autonomous mode
+	void AutonomousPeriodic()
+	{
+		float dsLeft = 0.0f;
+		float dsRight = 0.0f;
+		float dtLeft = 0.0f;
+		float dtRight = 0.0f;
+
+		elapsedTime = GetFPGATime();
+		elapsedTime = (elapsedTime - autoTime) / 1000;
+
+		if(autoSelected == autoDriveStraight)
+		{
+			if (elapsedTime < 2800)  //total travel time
 			{
-				driveTrain.SetSafetyEnabled(true);
-				driveSpinner.SetSafetyEnabled(true);
-				driveWinch.SetSafetyEnabled(false);
-				step1Time = prefs->GetLong("autoStep1Time");
-				step2Time = prefs->GetLong("autoStep2Time");
-				shootTime = prefs->GetLong("autoShootTime");
-				totalTime = step1Time + step2Time;
-				step1Speed = prefs->GetDouble("autoStep1Speed");
-				step2Speed = prefs->GetDouble("autoStep2Speed");
-				turnSpeed = prefs->GetDouble("autoTurnSpeed");
-				turnAngle = prefs->GetDouble("autoTurnAngle");
-				if (turnAngle == 0) turnAngle = 45.0;
-				autoTime = GetFPGATime();
-				bearing = gyroOne.GetAngle() + turnAngle;
-				SmartDashboard::PutNumber("Bearing",bearing);
-				autoSelected = *((std::string*)chooser->GetSelected());
+				if (elapsedTime < 1500)
+				{
+					dtLeft = -0.65;
+					dtRight = -0.65;   //drive forward slow
+				}
+				else
+				{
+					dtLeft = -1.0;
+					dtRight = -1.0;   //drive forward fast
+				}
 			}
-			while (IsAutonomous() && IsEnabled())
+		}
+		if(autoSelected == autoLowBarBackwards)
+		{
+			if (elapsedTime < 2800)  //total travel time
 			{
-				dtLeft = 0.0;
-				dtRight = 0.0;
-				dsLeft = 0.0;
-				dsRight = 0.0;
-				if(autoSelected == autoLowBarToLowGoal)
+				if (elapsedTime < 1500)
 				{
-					voltage = sonar.GetAverageVoltage();
-					distance = voltage / volts_to_inches;
-					testTime = GetFPGATime();
-					testTime = (testTime - autoTime) / 1000;  //get milliseconds
-					heading = gyroOne.GetAngle();
-					if (testTime < totalTime)  //total travel time
-					{
-						if (testTime < step1Time)
-						{
-							dtLeft = step1Speed;
-							dtRight = heading;   //drive straight past lowbar
-						}
-						else
-						{
-							if (heading < bearing)
-							{
-								dtLeft = turnSpeed;
-								dtRight = (bearing - heading)/turnAngle;  //curve to new heading
-							}
-							else
-							{
-								dtLeft = step2Speed;
-								dtRight = heading; //drive straight to low goal
-							}
-						}
-					}
-					if (testTime > totalTime && testTime < totalTime + shootTime)
-					{
-						dsLeft = 1.0;
-						dsRight = -1.0;
-					}
-					SmartDashboard::PutNumber("Heading", heading);
-					SmartDashboard::PutNumber("Distance",distance);
+					dtLeft = 0.65;
+					dtRight = 0.65;   //drive backward slow
 				}
-				if(autoSelected == autoDriveStraight)
+				else
 				{
-					testTime = GetFPGATime();
-					testTime = (testTime - autoTime) / 1000;  //get milliseconds
-					if (testTime < 2800)  //total travel time
-					{
-						if (testTime < 1500)
-						{
-							dtLeft = -0.65;
-							dtRight = -0.65;   //drive forward
-						}
-						else
-						{
-							dtLeft = -1.0;
-							dtRight = -1.0;   //drive forward
-						}
-					}
+					dtLeft = 1.0;
+					dtRight = 1.0;   //drive backward fast
 				}
-				driveTrain.Drive(dtLeft,dtRight);
-				driveSpinner.TankDrive(dsLeft,dsRight,false);
-				Wait(kUpdatePeriod); // Wait delay time before looping
 			}
-			std::cout << "AutoMode STOP" << std::endl;
 		}
 
+		driveTrain.TankDrive(dtLeft,dtRight);
+		driveSpinner.TankDrive(dsLeft,dsRight,false);
+	}
+
+	//runs once upon entering Operator Control mode
+	void TeleopInit()
+	{
+		std::cout << "OpMode START" << std::endl;
+		driveTrain.SetSafetyEnabled(true);
+		driveSpinner.SetSafetyEnabled(true);
+		kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+		kickerDelay = prefs->GetLong("kickerDelay");
+		shootSpeed = prefs->GetDouble("shootSpeed");
+		intakeSpeed = prefs->GetDouble("intakeSpeed");
+		releaseDelay = prefs->GetLong("releaseDelay");
+	}
+
+	// used in TeleopPeriodic
 	void RunShooter()
 	{
+		static bool triggerflag = false;
+		static bool lowballflag = false;
+		static bool kickflag = false;
+		static bool lowkickflag = false;
+		static bool intakeflag = false;
+		static bool mankickflag = false;
+		static bool releaseflag = false;
+		static uint64_t triggerTime = 0;
+		static uint64_t lowballTime = 0;
+		static uint64_t releaseTime = 0;
+		uint64_t elapsedTime = 0;
 		float spinLeftVal = 0.0f;     // left side driveSpinner output
 		float spinRightVal = 0.0f;	  // right side driveSpinner output
-		float intakeSpeed = 0.25f;    // speed of motors for intake of ball
-		float shootSpeed = 1.0f;      // speed of motors for shooting ball
 
-		try
+
+		//run spinner motors to intake ball
+		if (stick.GetRawButton(3) && !stick.GetRawButton(4) && !stick.GetRawButton(1))
 		{
-			spinLeftVal = 0;
-			spinRightVal = 0;
-			//run spinner motors to intake ball
-			if (stick.GetRawButton(3) == true && stick.GetRawButton(4) == false)
+			if(!intakeflag)
 			{
-				spinLeftVal = -1 * intakeSpeed;
-				spinRightVal = intakeSpeed;
+				printf("Intake Button + Kicker\n");
+				intakeflag=true;
+				//kickSolenoid.Set(DoubleSolenoid::Value::kForward);
 			}
-
-			//run spinner motors to shoot ball backward - low goal
-			if (stick.GetRawButton(4) == true && stick.GetRawButton(3) == false)
-			{
-				spinLeftVal = shootSpeed;
-				spinRightVal = -1 * shootSpeed;
-			}
-
-			//run spinner motors to shoot ball forward - high goal
-			//hold trigger and button 4 for high goal
-			if (stick.GetRawButton(4) == true && stick.GetRawButton(0) == true)
-			{
-				spinLeftVal = -1 * shootSpeed;
-				spinRightVal = shootSpeed;
-			}
-
-			driveSpinner.TankDrive(spinLeftVal,spinRightVal,false);
+			spinLeftVal = -1 * intakeSpeed;
+			spinRightVal = intakeSpeed;
 		}
-		catch (std::exception& ex )
+
+		//retract the kicker after delay when intake button released
+		if (!stick.GetRawButton(3) && intakeflag)
 		{
-			nowError = ex.what();
-			if (lastError != nowError)
+			if(!releaseflag)
 			{
-				DriverStation::ReportError("[SHOOTER ERROR] " + nowError + "\n");
-				lastError = nowError;
+				releaseflag = true;
+				releaseTime = GetFPGATime();
+			}
+			elapsedTime = GetFPGATime();
+			elapsedTime = (elapsedTime - releaseTime) / 1000;
+			if (elapsedTime > releaseDelay)
+			{
+				releaseflag = false;
+				intakeflag = false;
+				//kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+				printf("Intake Kicker Retract");
 			}
 		}
+
+		//put kicker forward when stick is pushed forward
+		if (stick.GetRawAxis(1) < -0.5)
+		{
+			if(!mankickflag)
+			{
+				printf("Manual Kick\n");
+				mankickflag=true;
+				kickSolenoid.Set(DoubleSolenoid::Value::kForward);
+			}
+		}
+
+		//release kicker when stick is not forward
+		if (stick.GetRawAxis(1) > -0.5 && mankickflag)
+		{
+			mankickflag=false;
+			kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+			printf("Manual Kick Retract\n");
+		}
+
+
+		//run spinner motors to shoot ball backward - low goal
+		if (stick.GetRawButton(4) && !stick.GetRawButton(3) && !stick.GetRawButton(1))
+		{
+			if(!lowballflag)
+			{
+				printf("LowBall Pulled\n");
+				lowballflag=true;
+				lowballTime = GetFPGATime();
+			}
+			spinLeftVal = shootSpeed;
+			spinRightVal = -1 * shootSpeed;
+			elapsedTime = GetFPGATime();
+			elapsedTime = (elapsedTime - lowballTime) / 1000;
+			//push kicker after delay for shooter wheels spinup
+			if (elapsedTime > kickerDelay)
+			{
+				if(!lowkickflag) {printf("LowBall Kick\n"); lowkickflag=true;}
+				kickSolenoid.Set(DoubleSolenoid::Value::kForward);
+			}
+		}
+
+		//retract the kicker when lowball released
+		if (!stick.GetRawButton(4) && lowballflag)
+		{
+			lowballflag=false;
+			lowkickflag=false;
+			kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+			printf("LowBall Kicker Retract\n");
+		}
+
+		//run spinner motors to shoot ball forward - high goal
+		if (stick.GetRawButton(1) && !stick.GetRawButton(3) && !stick.GetRawButton(4))
+		{
+			if(!triggerflag)
+			{
+				printf("Trigger Pulled\n");
+				triggerflag=true;
+				triggerTime = GetFPGATime();
+			}
+			spinLeftVal = -1 * shootSpeed;
+			spinRightVal = shootSpeed;
+
+			elapsedTime = GetFPGATime();
+			elapsedTime = (elapsedTime - triggerTime) / 1000;
+			//push kicker after delay for shooter wheels spinup
+			if (elapsedTime > kickerDelay)
+			{
+				if(!kickflag) {printf("Trigger Kick\n"); kickflag=true;}
+				kickSolenoid.Set(DoubleSolenoid::Value::kForward);
+			}
+		}
+
+		//retract the kicker when trigger released
+		if (!stick.GetRawButton(1) && triggerflag)
+		{
+			triggerflag=false;
+			kickflag=false;
+			kickSolenoid.Set(DoubleSolenoid::Value::kReverse);
+			printf("Kicker Retract\n");
+		}
+
+		driveSpinner.TankDrive(spinLeftVal,spinRightVal,false);
 	}
 
+	//used in TeleopPeriodic
 	void RunDriveTrain()
 	{
 		float leftRaw = 0.0f;         // left side joystick input
-		float leftVal = 0.0f;		  // left side drivetrain output
 		float rightRaw = 0.0f;        // right side joystick input
-		float rightVal = 0.0f;		  // right side drivetrain output
 
-		try
-		{
-			//get raw joystick values from xbox
-			leftRaw = xbox.GetRawAxis(1);
-			rightRaw = xbox.GetRawAxis(5);
-			//if filtering needed - put it here
-			leftVal = leftRaw;
-			rightVal = rightRaw;
-			//protect from out of range inputs
-			if (leftVal > 0.99) leftVal = 0.99;
-			if (leftVal <-0.99) leftVal = -0.99;
-			if (rightVal > 0.99) rightVal = 0.99;
-			if (rightVal < -0.99) rightVal = -0.99;
-			driveTrain.TankDrive(leftVal,rightVal);
-		}
-		catch (std::exception& ex )
-		{
-			nowError = ex.what();
-			if (lastError != nowError)
-			{
-				DriverStation::ReportError("[DRIVETRAIN ERROR] " + nowError + "\n");
-				lastError = nowError;
-			}
-		}
+		//get raw joystick values from xbox
+		leftRaw = xbox.GetRawAxis(1);
+		rightRaw = xbox.GetRawAxis(5);
+		//protect from out of range inputs
+		if (leftRaw > 0.99) leftRaw = 0.99;
+		if (leftRaw <-0.99) leftRaw = -0.99;
+		if (rightRaw > 0.99) rightRaw = 0.99;
+		if (rightRaw < -0.99) rightRaw = -0.99;
+		driveTrain.TankDrive(leftRaw,rightRaw);
 	}
 
-	void OperatorControl()
+	//runs repeatedly while in Operator Control mode
+	void TeleopPeriodic()
 	{
-		float winchTapeVal = 0.0f;
-		float winchPullVal = 0.0f;
-
-		if (IsOperatorControl() && IsEnabled())
-		{
-			std::cout << "OpMode START" << std::endl;
-			driveTrain.SetExpiration(0.25);
-			driveSpinner.SetExpiration(0.25);
-			driveWinch.SetExpiration(0.25);
-			driveTrain.SetSafetyEnabled(true);
-			driveSpinner.SetSafetyEnabled(true);
-			driveWinch.SetSafetyEnabled(true);
-			tapeSpeed = prefs->GetDouble("tapeSpeed",1.00);
-			pullSpeed = prefs->GetDouble("pullSpeed",1.00);
-		}
-		while (IsOperatorControl() && IsEnabled())
-		{
-			try
-			{
-				RunShooter();
-				RunDriveTrain();
-				winchTapeVal = 0;
-				winchPullVal = 0;
-				//pull in on tape winch
-				if (stick.GetRawButton(9) == true  && stick.GetRawButton(11) == false)
-					winchTapeVal = -1 * tapeSpeed;
-				//pay out on tape winch
-				if (stick.GetRawButton(11) == true  && stick.GetRawButton(9) == false)
-					winchTapeVal = tapeSpeed;
-				//pull in on pull winch
-				if (stick.GetRawButton(12) == true && stick.GetRawButton(11) == false)
-					winchPullVal = -1 * pullSpeed;
-				//pay out on pull winch
-				if (stick.GetRawButton(10) == true && stick.GetRawButton(12) == false)
-					winchPullVal = pullSpeed;
-				driveWinch.TankDrive(winchTapeVal,winchPullVal,false);
-			}
-			catch (std::exception& ex )
-			{
-				nowError = ex.what();
-				if (lastError != nowError)
-				{
-					DriverStation::ReportError("[OPMODE ERROR] " + nowError + "\n");
-					lastError = nowError;
-				}
-			}
-			Wait(kUpdatePeriod);
-		}
-		driveTrain.TankDrive(0.0,0.0,false);
-		driveSpinner.TankDrive(0.0,0.0,false);
-		driveWinch.TankDrive(0.0,0.0,false);
-		std::cout << "OpMode STOP" << std::endl;
+		RunShooter();
+		RunDriveTrain();
 	}
 
-	void Test()
+	void DisabledInit()
 	{
-		float winchTapeVal = 0.0f;
-		float winchPullVal = 0.0f;
-
-		if (IsTest() && IsEnabled())
-		{
-			std::cout << "testMode START" << std::endl;
-			//LiveWindow::GetInstance()->Run();
-		}
-		while (IsTest() && IsEnabled())
-		{
-			try
-			{
-				//pull in on tape winch
-				if (stick.GetRawButton(9) == true  && stick.GetRawButton(11) == false)
-					winchTapeVal = -1 * tapeSpeed;
-				//pay out on tape winch
-				if (stick.GetRawButton(11) == true  && stick.GetRawButton(9) == false)
-					winchTapeVal = tapeSpeed;
-				//pay out on pull winch
-				if (stick.GetRawButton(10) == true && stick.GetRawButton(12) == false)
-					winchPullVal = pullSpeed;
-				//pull in on pull winch
-				if (stick.GetRawButton(12) == true && stick.GetRawButton(11) == false)
-					winchPullVal = -1 * pullSpeed;
-				driveWinch.TankDrive(winchTapeVal,winchPullVal,false);
-				driveTrain.TankDrive(0.0,0.0,false);
-				driveSpinner.TankDrive(0.0,0.0,false);
-				SmartDashboard::PutNumber("Heading", (double)gyroOne.GetAngle());
-				SmartDashboard::PutNumber("Distance",sonar.GetAverageVoltage()/volts_to_inches);
-			}
-			catch (std::exception& ex )
-			{
-				nowError = ex.what();
-				if (lastError != nowError)
-				{
-					DriverStation::ReportError("[TESTMODE ERROR] " + nowError + "\n");
-					lastError = nowError;
-				}
-			}
-			Wait(kUpdatePeriod);
-		}
-		std::cout << "testMode STOP" << std::endl;
+		driveTrain.TankDrive(0.0,0.0);
+		driveSpinner.TankDrive(0.0,0.0);
 	}
 
+	//runs repeatedly while in Test mode
+	void TestPeriodic()
+	{
+		lw->Run();
+	}
 };
 
 START_ROBOT_CLASS(Robot)
